@@ -1,0 +1,46 @@
+# Google Apps Script specific
+.clasp.json
+appsscript.json
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Environment and configuration files
+.env
+.env.local
+.env.production
+config.json
+
+# Node.js (if used for development tools)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Backup files
+*.backup
+*.bak
+
+# History directory (appears to be local)
+.history/
