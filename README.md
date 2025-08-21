@@ -16,7 +16,9 @@ A Google Apps Script that automatically sends scheduled Telegram messages based 
 
 ### 1. Google Spreadsheet Setup
 
-Create a Google Spreadsheet with the following columns:
+**Quick Start:** Use this pre-configured template: [Telegram Scheduled Messages Template](https://docs.google.com/spreadsheets/d/1KC2QzXQDOU7whuxbIYAxDnHK0Lx0ORNLz9cJPcA6X7k/edit?usp=sharing)
+
+*Or create your own Google Spreadsheet with the following columns:*
 
 | Column | Name | Description | Example |
 |--------|------|-------------|---------|
