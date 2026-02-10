@@ -78,10 +78,13 @@ const MAX_MESSAGES_PER_DAY = 5
 const MAX_MESSAGE_LENGTH = 4096;
 
 // Maximum number of URLs allowed per message
-const MAX_URLS_PER_MESSAGE = 3;
+const MAX_URLS_PER_MESSAGE = 10;
 
 // Block message if it contains more than this many URLs (stricter check)
 const MAX_SUSPICIOUS_URLS = 1;
+
+// Debug test: only analyze this many upcoming messages (by schedule time)
+const DEBUG_TEST_MAX_MESSAGES = 5;
 
 // Suspicious keywords that may indicate spam (English and German)
 const SUSPICIOUS_KEYWORDS = [
@@ -155,19 +158,22 @@ const REQUIRED_KEYWORDS = [
 
 /**
  * Check rate limiting to prevent too many messages in a short time
- * Uses PropertiesService to track message counts per hour and per day
+ * Uses CacheService to track message counts per hour and per day.
+ * Note: CacheService is best-effort and values may reset if the cache is cleared.
  * NOTE: This only CHECKS the limit, does NOT increment counters
  * @returns {Object} - Rate limit check result with isAllowed and reason
  */
 function checkRateLimit() {
-  const props = PropertiesService.getScriptProperties();
   const now = new Date();
-  const hourKey = `msg_count_hour_${now.getHours()}_${now.getDate()}`;
-  const dayKey = `msg_count_day_${now.getDate()}_${now.getMonth()}_${now.getFullYear()}`;
+  
+  // Use script cache for transient rate limit counters
+  const cache = CacheService.getScriptCache();
+  const hourKey = `rate_hour_${now.getFullYear()}_${now.getMonth()}_${now.getDate()}_${now.getHours()}`;
+  const dayKey = `rate_day_${now.getFullYear()}_${now.getMonth()}_${now.getDate()}`;
   
   // Get current counts
-  const hourCount = parseInt(props.getProperty(hourKey) || '0');
-  const dayCount = parseInt(props.getProperty(dayKey) || '0');
+  const hourCount = parseInt(cache.get(hourKey) || '0');
+  const dayCount = parseInt(cache.get(dayKey) || '0');
   
   // Check hourly limit
   if (hourCount >= MAX_MESSAGES_PER_HOUR) {
@@ -202,27 +208,24 @@ function checkRateLimit() {
  * Call this ONLY after a message has been successfully sent
  */
 function incrementRateLimit() {
-  const props = PropertiesService.getScriptProperties();
   const now = new Date();
-  const hourKey = `msg_count_hour_${now.getHours()}_${now.getDate()}`;
-  const dayKey = `msg_count_day_${now.getDate()}_${now.getMonth()}_${now.getFullYear()}`;
+  
+  // Use script cache for transient rate limit counters
+  const cache = CacheService.getScriptCache();
+  const hourKey = `rate_hour_${now.getFullYear()}_${now.getMonth()}_${now.getDate()}_${now.getHours()}`;
+  const dayKey = `rate_day_${now.getFullYear()}_${now.getMonth()}_${now.getDate()}`;
   
   // Get current counts and increment
-  const hourCount = parseInt(props.getProperty(hourKey) || '0');
-  const dayCount = parseInt(props.getProperty(dayKey) || '0');
+  const hourCount = parseInt(cache.get(hourKey) || '0');
+  const dayCount = parseInt(cache.get(dayKey) || '0');
+
+  // Cache lifetimes: 1 hour for hourly counter, up to 6 hours for daily counter (Apps Script max)
+  const newHourCount = hourCount + 1;
+  const newDayCount = dayCount + 1;
+  cache.put(hourKey, newHourCount.toString(), 60 * 60);      // 1 hour
+  cache.put(dayKey, newDayCount.toString(), 6 * 60 * 60);    // up to 6 hours
   
-  props.setProperty(hourKey, (hourCount + 1).toString());
-  props.setProperty(dayKey, (dayCount + 1).toString());
-  
-  // Clean up old hour keys (keep only current hour)
-  const allProps = props.getProperties();
-  for (const key in allProps) {
-    if (key.startsWith('msg_count_hour_') && key !== hourKey) {
-      props.deleteProperty(key);
-    }
-  }
-  
-  console.log(`Rate limit counters incremented: ${hourCount + 1}/${MAX_MESSAGES_PER_HOUR} per hour, ${dayCount + 1}/${MAX_MESSAGES_PER_DAY} per day`);
+  console.log(`Rate limit counters (cache) incremented: ${newHourCount}/${MAX_MESSAGES_PER_HOUR} per hour, ${newDayCount}/${MAX_MESSAGES_PER_DAY} per day`);
 }
 
 /**
@@ -230,19 +233,27 @@ function incrementRateLimit() {
  * Run this function manually from Apps Script to clear the counters
  */
 function resetRateLimit() {
+  // Clear current cache-based counters
+  const now = new Date();
+  const cache = CacheService.getScriptCache();
+  const hourKey = `rate_hour_${now.getFullYear()}_${now.getMonth()}_${now.getDate()}_${now.getHours()}`;
+  const dayKey = `rate_day_${now.getFullYear()}_${now.getMonth()}_${now.getDate()}`;
+  
+  cache.remove(hourKey);
+  cache.remove(dayKey);
+
+  // Clean up any legacy PropertiesService-based rate limit keys
   const props = PropertiesService.getScriptProperties();
   const allProps = props.getProperties();
-  
-  // Delete all rate limit keys
   for (const key in allProps) {
     if (key.startsWith('msg_count_hour_') || key.startsWith('msg_count_day_')) {
       props.deleteProperty(key);
-      console.log(`Deleted rate limit key: ${key}`);
+      console.log(`Deleted legacy rate limit key: ${key}`);
     }
   }
   
-  console.log('Rate limit counters have been reset to 0');
-  return 'Rate limit counters reset successfully';
+  console.log('Rate limit counters have been reset (cache cleared, legacy properties removed)');
+  return 'Rate limit counters reset successfully (cache + legacy properties)';
 }
 
 /**
@@ -999,7 +1010,7 @@ function debugTest() {
                         `🔑 TOKEN: ${TOKEN ? 'Found' : 'Missing'}\n` +
                         `💬 CHAT_ID: ${CHAT_ID}\n` +
                         `📊 Properties working: ${PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN') ? 'Yes' : 'No'}\n\n` +
-                        `📋 Now analyzing all enabled messages from spreadsheet...`;
+                        `📋 Now analyzing next ${DEBUG_TEST_MAX_MESSAGES} upcoming enabled messages...`;
   
   console.log('Sending system debug message...');
   sendDebugMessage(systemMessage, true);
@@ -1007,42 +1018,47 @@ function debugTest() {
   // Brief delay before processing spreadsheet to avoid rate limiting
   Utilities.sleep(1000);
   
-  // Process spreadsheet and analyze each enabled message
+  // Process spreadsheet and analyze only the next N upcoming enabled messages
   try {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
     const data = sheet.getDataRange().getValues();
     
     console.log('Processing spreadsheet with', data.length - 1, 'rows');
     
-    let enabledCount = 0;
-    let sentCount = 0;
-    let blockedCount = 0;
-    let validationFailedCount = 0;
-    
-    // Process each row (skip header row at index 0)
+    // Collect all enabled rows with datetime, then sort by schedule time (soonest first)
+    const enabledRows = [];
     for (let i = 1; i < data.length; i++) {
       const row = data[i];
-      
-      // Skip rows without a datetime value
-      if (!row[COL_DATETIME]) continue;
-      
-      // Extract row data
-      const start = new Date(row[COL_DATETIME]);
-      const msg = row[COL_MESSAGE];
-      const repeatRaw = row[COL_REPEAT] || '';
+      if (!row[COL_DATETIME] || !row[COL_MESSAGE]) continue;
       const enabled = row[COL_ENABLED];
-      
-      // Check if message is enabled (supports multiple formats)
-      const isEnabled = enabled === true || 
-                       enabled === '✅' || 
+      const isEnabled = enabled === true ||
+                       enabled === '✅' ||
                        (typeof enabled === 'string' && (
                          enabled.toLowerCase().trim() === 'yes' ||
                          enabled.toLowerCase().trim() === 'true' ||
                          enabled.includes('✅')
                        ));
+      if (isEnabled) {
+        enabledRows.push({ i: i, row: row, start: new Date(row[COL_DATETIME]) });
+      }
+    }
+    enabledRows.sort((a, b) => a.start.getTime() - b.start.getTime());
+    const rowsToTest = enabledRows.slice(0, DEBUG_TEST_MAX_MESSAGES);
+    
+    console.log('Total enabled:', enabledRows.length, '- Testing upcoming', rowsToTest.length, 'messages');
+    
+    const totalEnabled = enabledRows.length;
+    let sentCount = 0;
+    let blockedCount = 0;
+    let validationFailedCount = 0;
+    
+    // Process only the upcoming N messages
+    for (const { i, row } of rowsToTest) {
+      const start = new Date(row[COL_DATETIME]);
+      const msg = row[COL_MESSAGE];
+      const repeatRaw = row[COL_REPEAT] || '';
       
-      if (msg && isEnabled) {
-        enabledCount++;
+      if (msg) {
         
         // Analyze scheduling logic (same as main function)
         const now = new Date();
@@ -1229,8 +1245,9 @@ function debugTest() {
     
     // Send summary message
     const summaryMessage = `📊 DEBUG TEST COMPLETE\n\n` +
-                          `📋 Total rows processed: ${data.length - 1}\n` +
-                          `✅ Enabled messages found: ${enabledCount}\n` +
+                          `📋 Total rows in sheet: ${data.length - 1}\n` +
+                          `✅ Enabled messages (total): ${totalEnabled}\n` +
+                          `📌 Upcoming messages tested: ${rowsToTest.length}\n` +
                           `📤 Analysis messages sent: ${sentCount}\n` +
                           `🚫 Messages that would be blocked: ${blockedCount}\n` +
                           `⚠️ Validation failures: ${validationFailedCount}\n` +
@@ -1239,7 +1256,7 @@ function debugTest() {
     sendDebugMessage(summaryMessage, true);
     
     console.log('=== DEBUG TEST COMPLETED ===');
-    return `Debug test completed. Sent ${sentCount} of ${enabledCount} enabled messages.`;
+    return `Debug test completed. Sent ${sentCount} of ${rowsToTest.length} upcoming messages (${totalEnabled} enabled total).`;
     
   } catch (e) {
     // Sanitize error message before logging and sending
