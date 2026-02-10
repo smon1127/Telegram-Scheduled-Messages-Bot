@@ -28,9 +28,11 @@ const COL_LAST_SENT = 4;  // Column E: Last sent timestamp
 // - TELEGRAM_TOKEN = your_bot_token
 // - CHAT_ID = your_production_chat_id  
 // - DEBUG_CHAT_ID = your_debug_chat_id
+// - AG_CHAT_ID = chat_id for the AG helper poll
 const TOKEN = PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
 const CHAT_ID = PropertiesService.getScriptProperties().getProperty('CHAT_ID');
 const DEBUG_CHAT_ID = PropertiesService.getScriptProperties().getProperty('DEBUG_CHAT_ID');
+const AG_CHAT_ID = PropertiesService.getScriptProperties().getProperty('AG_CHAT_ID');
 
 // =============================================================================
 // SECURITY CONFIGURATION
@@ -744,6 +746,53 @@ function validateMessage(message) {
 }
 
 /**
+ * Send the helper poll to the AG chat.
+ * This can be run directly from the Apps Script editor for testing.
+ * @returns {boolean} - True if the poll was sent successfully
+ */
+function sendHelperPoll() {
+  if (!TOKEN) {
+    console.error('Cannot send helper poll: TELEGRAM_TOKEN not configured');
+    return false;
+  }
+  if (!AG_CHAT_ID) {
+    console.error('Cannot send helper poll: AG_CHAT_ID not configured in Script Properties');
+    return false;
+  }
+
+  const pollUrl = `https://api.telegram.org/bot${TOKEN}/sendPoll`;
+  const pollPayload = {
+    chat_id: AG_CHAT_ID,
+    question: 'Wer kann beim nächsten Tontag helfen?',
+    options: ['Aufbau', 'Abbau', 'Ich kann nicht'],
+    allows_multiple_answers: true,
+    is_anonymous: false
+  };
+
+  try {
+    const pollResponse = UrlFetchApp.fetch(pollUrl, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(pollPayload)
+    });
+    const pollResponseData = JSON.parse(pollResponse.getContentText());
+    const sanitizedPollResponse = sanitizeApiResponse(pollResponseData);
+    console.log('Telegram Poll API response:', sanitizedPollResponse);
+
+    if (pollResponseData.ok) {
+      console.log('Helper poll sent successfully');
+      return true;
+    } else {
+      console.error('Failed to send helper poll:', sanitizeErrorMessage(pollResponseData.description || 'Unknown Telegram Poll API error'));
+      return false;
+    }
+  } catch (e) {
+    console.error('Error sending helper poll:', sanitizeErrorMessage(e.message));
+    return false;
+  }
+}
+
+/**
  * Notify admin via debug chat when messages are blocked
  * @param {number} rowNumber - The row number (1-based, spreadsheet row)
  * @param {string} message - Full message content that was blocked
@@ -1442,6 +1491,14 @@ function sendScheduledMessages() {
             
             // Increment rate limit counter only after successful send
             incrementRateLimit();
+
+            // If this message contained URLs, also send helper poll to AG chat
+            if (validationResult && validationResult.foundUrls && validationResult.foundUrls.length > 0) {
+              const pollSent = sendHelperPoll();
+              if (!pollSent) {
+                console.warn('Helper poll could not be sent (see logs above).');
+              }
+            }
           } else {
             throw new Error(responseData.description || 'Unknown Telegram API error');
           }
